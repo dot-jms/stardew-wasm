@@ -55,20 +55,7 @@ async function downloadTarToMemory(base, label) {
 }
 
 async function downloadAndCacheTar(base, label, key) {
-	let writer;
-	try {
-		writer = await (await opfs.getFileHandle(key, { create: true })).createWritable();
-		await readTarChunks(base, label, (chunk) => writer.write(chunk));
-		loading.textContent = `Caching ${label}...`;
-		await writer.close();
-		return await opfsRead(key);
-	} catch {
-		try { await writer?.abort(); } catch {}
-		// A failed OPFS write can leave a newly-created zero-byte handle. Never let
-		// that masquerade as a valid cached archive on the next launch.
-		try { await opfs.removeEntry(key); } catch {}
-		return await downloadTarToMemory(base, label);
-	}
+	return await downloadTarToMemory(base, label);
 }
 
 async function getTar(base, label, key) {
