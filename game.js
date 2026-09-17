@@ -3,7 +3,7 @@ const canvas = document.getElementById("canvas");
 const musicChoice = document.getElementById("music-choice");
 
 // ============================================================
-// Loading UI
+// Loading UI + visible debug log
 // ============================================================
 
 const loadingUI = document.createElement("div");
@@ -11,14 +11,16 @@ const loadingUI = document.createElement("div");
 loadingUI.innerHTML = `
 	<div id="load-title" style="
 		font-size:1.5rem;
-		margin-bottom:.25rem;
+		margin-bottom:10px;
 	">Starting...</div>
 
-	<div id="content-load" style="width:min(520px,80vw);">
+	<div id="content-load" style="
+		width:min(520px,80vw);
+	">
 		<div id="content-label" style="
 			font-size:.9rem;
 			opacity:.8;
-			margin-bottom:.35rem;
+			margin-bottom:5px;
 		">Game content</div>
 
 		<div style="
@@ -38,11 +40,14 @@ loadingUI.innerHTML = `
 		</div>
 	</div>
 
-	<div id="runtime-load" style="width:min(520px,80vw);">
+	<div id="runtime-load" style="
+		width:min(520px,80vw);
+		margin-top:14px;
+	">
 		<div id="runtime-label" style="
 			font-size:.9rem;
 			opacity:.8;
-			margin-bottom:.35rem;
+			margin-bottom:5px;
 		">Game runtime</div>
 
 		<div style="
@@ -61,11 +66,32 @@ loadingUI.innerHTML = `
 			"></div>
 		</div>
 	</div>
+
+	<div id="debug-box" style="
+		display:block;
+		width:min(760px,90vw);
+		margin-top:18px;
+		padding:12px;
+		box-sizing:border-box;
+		background:rgba(0,0,0,.7);
+		border:1px solid rgba(255,255,255,.2);
+		border-radius:8px;
+		text-align:left;
+		font-family:monospace;
+		font-size:12px;
+		line-height:1.4;
+		max-height:300px;
+		overflow:auto;
+		white-space:pre-wrap;
+		word-break:break-word;
+	">
+	</div>
 `;
 
 loading.appendChild(loadingUI);
 
-const loadTitle = document.getElementById("load-title");
+const loadTitle =
+	document.getElementById("load-title");
 
 const contentLabel =
 	document.getElementById("content-label");
@@ -79,8 +105,36 @@ const runtimeLabel =
 const runtimeBar =
 	document.getElementById("runtime-bar");
 
+const debugBox =
+	document.getElementById("debug-box");
+
+function debugLog(message) {
+	const time =
+		new Date().toLocaleTimeString();
+
+	debugBox.textContent +=
+		`[${time}] ${message}\n`;
+
+	debugBox.scrollTop =
+		debugBox.scrollHeight;
+}
+
+function debugError(error) {
+	const message =
+		error?.message ??
+		String(error);
+
+	const stack =
+		error?.stack ??
+		"No stack trace available.";
+
+	debugLog(`ERROR: ${message}`);
+	debugLog(`STACK:\n${stack}`);
+}
+
 function setTitle(text) {
 	loadTitle.textContent = text;
+	debugLog(`STAGE: ${text}`);
 }
 
 function setContentProgress(
@@ -119,44 +173,59 @@ function setRuntimeProgress(
 			text;
 }
 
-// ============================================================
-// Error reporting
-// ============================================================
-
 function showLoadError(error) {
 	console.error(error);
 
-	setTitle("Game failed to load");
+	loadTitle.textContent =
+		"Game failed to load";
 
 	contentLabel.textContent =
-		error?.message ||
-		String(error);
+		"Game content loaded";
 
 	runtimeLabel.textContent =
-		"Check the browser console for details.";
+		"Runtime error";
 
-	contentBar.style.width = "0%";
-	runtimeBar.style.width = "0%";
+	debugError(error);
 }
 
 window.addEventListener(
 	"error",
 	(event) => {
-		if (event.error)
+		debugLog(
+			`WINDOW ERROR: ${event.message || "Unknown error"}`
+		);
+
+		if (event.error) {
+			showLoadError(event.error);
+		} else {
 			showLoadError(
-				event.error
+				new Error(
+					event.message ||
+					"Unknown browser error"
+				)
 			);
+		}
 	}
 );
 
 window.addEventListener(
 	"unhandledrejection",
 	(event) => {
+		debugLog(
+			"UNHANDLED PROMISE REJECTION"
+		);
+
 		showLoadError(
-			event.reason
+			event.reason instanceof Error
+				? event.reason
+				: new Error(
+					String(event.reason)
+				)
 		);
 	}
 );
+
+debugLog("Booting Stardew web port...");
 
 // ============================================================
 // OPFS helpers
@@ -188,17 +257,20 @@ async function opfsRead(name) {
 }
 
 // ============================================================
-// Chunk helpers
+// Chunk count
 // ============================================================
 
 async function fetchChunkCount(url) {
+	debugLog(`Reading chunk count: ${url}`);
+
 	const response =
 		await fetch(url);
 
-	if (!response.ok)
+	if (!response.ok) {
 		throw new Error(
 			`Failed to fetch ${url}: HTTP ${response.status}`
 		);
+	}
 
 	const text =
 		(await response.text()).trim();
@@ -222,8 +294,7 @@ async function fetchChunkCount(url) {
 async function readTarChunks(
 	base,
 	label,
-	writeChunk,
-	progressType
+	writeChunk
 ) {
 	setTitle(
 		`Downloading ${label}...`
@@ -234,6 +305,10 @@ async function readTarChunks(
 			base + ".count"
 		);
 
+	debugLog(
+		`${label}: ${count} chunks`
+	);
+
 	let total = 0;
 
 	for (
@@ -241,73 +316,65 @@ async function readTarChunks(
 		i < count;
 		i++
 	) {
-		const res =
-			await fetch(
-				`${base}${String(i).padStart(2, "0")}`
-			);
+		const url =
+			`${base}${String(i).padStart(2, "0")}`;
 
-		if (!res.ok)
+		debugLog(
+			`Fetching ${label} chunk ${i + 1}/${count}...`
+		);
+
+		const res =
+			await fetch(url);
+
+		if (!res.ok) {
 			throw new Error(
 				`Failed to fetch ${res.url}: HTTP ${res.status}`
 			);
+		}
 
-		if (!res.body)
+		if (!res.body) {
 			throw new Error(
 				`Streaming response body unavailable for ${res.url}`
 			);
+		}
 
 		const reader =
 			res.body.getReader();
-
-		let chunkBytes = 0;
 
 		for (;;) {
 			const {
 				done,
 				value
-			} = await reader.read();
+			} =
+				await reader.read();
 
 			if (done)
 				break;
 
 			await writeChunk(value);
 
-			total += value.length;
-			chunkBytes += value.length;
-
-			const partial =
-				Math.min(
-					0.95,
-					chunkBytes /
-						Math.max(
-							chunkBytes,
-							1
-						)
-				);
-
-			const fraction =
-				(i + partial) / count;
-
-			if (
-				progressType ===
-				"content"
-			) {
-				setContentProgress(
-					fraction,
-					`${label} — ${(total / 1048576) | 0} MB`
-				);
-			}
+			total +=
+				value.length;
 		}
 
-		if (
-			progressType ===
-			"content"
-		) {
+		const fraction =
+			(i + 1) / count;
+
+		if (label === "game content") {
 			setContentProgress(
-				(i + 1) / count,
+				fraction,
+				`${label} — chunk ${i + 1}/${count} — ${(total / 1048576) | 0} MB`
+			);
+		} else {
+			setContentProgress(
+				fraction,
 				`${label} — chunk ${i + 1}/${count}`
 			);
 		}
+
+		debugLog(
+			`${label} chunk ${i + 1}/${count} loaded.`
+		);
 	}
 
 	return total;
@@ -331,6 +398,10 @@ async function downloadTarToMemory(
 
 	let offset = 0;
 
+	debugLog(
+		`Allocating ${initialSize / 1048576} MB buffer for ${label}.`
+	);
+
 	await readTarChunks(
 		base,
 		label,
@@ -345,10 +416,14 @@ async function downloadTarToMemory(
 				while (
 					newSize <
 					offset +
-						chunk.length
+					chunk.length
 				) {
 					newSize *= 2;
 				}
+
+				debugLog(
+					`Growing ${label} buffer to ${newSize / 1048576} MB.`
+				);
 
 				const next =
 					new Uint8Array(
@@ -367,13 +442,11 @@ async function downloadTarToMemory(
 
 			offset +=
 				chunk.length;
-		},
-		"content"
+		}
 	);
 
-	setContentProgress(
-		1,
-		`${label} loaded`
+	debugLog(
+		`${label} loaded: ${(offset / 1048576).toFixed(1)} MB`
 	);
 
 	return tar.subarray(
@@ -382,10 +455,7 @@ async function downloadTarToMemory(
 	);
 }
 
-// ============================================================
-// Initial content load bypasses OPFS
-// ============================================================
-
+// Initial content bypasses OPFS.
 async function getTar(
 	base,
 	label,
@@ -408,7 +478,7 @@ const audioCached =
 
 const wantMusic =
 	audioCached ||
-	(await new Promise(
+	await new Promise(
 		(resolve) => {
 			musicChoice.style.display =
 				"";
@@ -421,6 +491,10 @@ const wantMusic =
 					musicChoice.style.display =
 						"none";
 
+					debugLog(
+						"User selected: without music"
+					);
+
 					resolve(false);
 				};
 
@@ -432,20 +506,21 @@ const wantMusic =
 					musicChoice.style.display =
 						"none";
 
+					debugLog(
+						"User selected: with music"
+					);
+
 					resolve(true);
 				};
 		}
-	));
+	);
 
 musicChoice.style.display =
 	"none";
 
 // ============================================================
-// Runtime loading
+// Runtime loader
 // ============================================================
-
-let runtimeChunkCount = 0;
-let runtimeChunkLoaded = 0;
 
 const runtimeP =
 	(async () => {
@@ -454,10 +529,19 @@ const runtimeP =
 			"Loading .NET runtime..."
 		);
 
+		debugLog(
+			"Importing ./_framework/dotnet.js..."
+		);
+
 		const {
 			dotnet
-		} = await import(
-			"./_framework/dotnet.js"
+		} =
+			await import(
+				"./_framework/dotnet.js"
+			);
+
+		debugLog(
+			"dotnet.js imported successfully."
 		);
 
 		return dotnet
@@ -472,7 +556,6 @@ const runtimeP =
 				`--jiterpreter-minimum-trace-hit-count=${500}`,
 				`--jiterpreter-trace-monitoring-period=${100}`,
 				`--jiterpreter-trace-monitoring-max-average-penalty=${150}`,
-				`--jiterpreter-trace-monitoring-max-average-penalty=${150}`,
 				`--jiterpreter-wasm-bytes-limit=${64 * 1024 * 1024}`,
 				`--jiterpreter-table-size=${32 * 1024}`,
 			])
@@ -485,27 +568,25 @@ const runtimeP =
 					behavior
 				) => {
 					if (
-						type !==
-							"dotnetwasm" ||
-						behavior !==
-							"dotnetwasm"
+						type !== "dotnetwasm" ||
+						behavior !== "dotnetwasm"
 					) {
 						return;
 					}
 
 					return (async () => {
-						runtimeChunkCount =
+						debugLog(
+							`WASM resource requested: ${defaultUri}`
+						);
+
+						const count =
 							await fetchChunkCount(
 								defaultUri +
-									".count"
+								".count"
 							);
 
-						runtimeChunkLoaded =
-							0;
-
-						setRuntimeProgress(
-							0,
-							`.NET runtime — 0/${runtimeChunkCount} chunks`
+						debugLog(
+							`WASM runtime has ${count} chunks.`
 						);
 
 						let idx = 0;
@@ -514,37 +595,49 @@ const runtimeP =
 							async () => {
 								if (
 									idx >=
-									runtimeChunkCount
+									count
 								) {
 									return null;
 								}
 
+								const chunkNumber =
+									idx;
+
 								const uri =
 									defaultUri +
-									idx;
+									chunkNumber;
+
+								debugLog(
+									`Fetching WASM chunk ${chunkNumber + 1}/${count}...`
+								);
 
 								const res =
 									await fetch(
 										uri
 									);
 
-								idx++;
-
-								if (
-									!res.ok
-								) {
+								if (!res.ok) {
 									throw new Error(
 										`Failed to fetch ${uri}: HTTP ${res.status}`
 									);
 								}
 
-								if (
-									!res.body
-								) {
+								if (!res.body) {
 									throw new Error(
 										`Streaming response body unavailable for ${uri}`
 									);
 								}
+
+								idx++;
+
+								debugLog(
+									`WASM chunk ${chunkNumber + 1}/${count} downloaded.`
+								);
+
+								setRuntimeProgress(
+									chunkNumber / count,
+									`.NET runtime — ${chunkNumber + 1}/${count} chunks`
+								);
 
 								return res.body.getReader();
 							};
@@ -552,58 +645,55 @@ const runtimeP =
 						let current =
 							await fetchNext();
 
-						if (
-							!current
-						) {
+						if (!current) {
 							throw new Error(
 								"Failed to fetch first WASM chunk"
 							);
 						}
 
 						return new Response(
-							new ReadableStream(
-								{
-									async pull(
-										controller
+							new ReadableStream({
+								async pull(
+									controller
+								) {
+									const {
+										value,
+										done
+									} =
+										await current.read();
+
+									if (
+										done ||
+										!value
 									) {
-										const {
-											value,
-											done
-										} =
-											await current.read();
+										current =
+											await fetchNext();
 
 										if (
-											done ||
-											!value
+											current
 										) {
-											runtimeChunkLoaded++;
-
-											setRuntimeProgress(
-												runtimeChunkLoaded /
-													runtimeChunkCount,
-												`.NET runtime — ${runtimeChunkLoaded}/${runtimeChunkCount} chunks`
+											await this.pull(
+												controller
 											);
-
-											current =
-												await fetchNext();
-
-											if (
-												current
-											) {
-												await this.pull(
-													controller
-												);
-											} else {
-												controller.close();
-											}
 										} else {
-											controller.enqueue(
-												value
+											setRuntimeProgress(
+												1,
+												".NET runtime downloaded"
 											);
+
+											debugLog(
+												"All WASM runtime chunks streamed."
+											);
+
+											controller.close();
 										}
-									},
-								}
-							),
+									} else {
+										controller.enqueue(
+											value
+										);
+									}
+								},
+							}),
 							{
 								headers: {
 									"Content-Type":
@@ -618,8 +708,12 @@ const runtimeP =
 	})();
 
 // ============================================================
-// Download content + boot runtime in parallel
+// Download game files + start runtime in parallel
 // ============================================================
+
+debugLog(
+	"Starting content/runtime tasks in parallel..."
+);
 
 const contentP =
 	getTar(
@@ -631,31 +725,38 @@ const contentP =
 const audioP =
 	wantMusic
 		? getTar(
-				"ContentAudio.tar",
-				"music",
-				"ContentAudio.tar"
-			)
-		: Promise.resolve(
-				null
-			);
+			"ContentAudio.tar",
+			"music",
+			"ContentAudio.tar"
+		)
+		: Promise.resolve(null);
 
 const [
 	contentTar,
 	audioTar,
 	runtime
-] = await Promise.all([
-	contentP,
-	audioP,
-	runtimeP
-]);
+] =
+	await Promise.all([
+		contentP,
+		audioP,
+		runtimeP
+	]);
 
-setTitle(
-	"Starting game..."
+debugLog(
+	"Content and runtime preparation finished."
 );
 
 setRuntimeProgress(
 	1,
 	".NET runtime ready"
+);
+
+setTitle(
+	"Starting game runtime..."
+);
+
+debugLog(
+	"Getting .NET assembly exports..."
 );
 
 // ============================================================
@@ -667,6 +768,10 @@ const exports =
 		runtime.getConfig()
 			.mainAssemblyName
 	);
+
+debugLog(
+	"Assembly exports loaded successfully."
+);
 
 // ============================================================
 // Tar parser
@@ -884,9 +989,9 @@ function parseTar(tar) {
 		const path =
 			fullName.endsWith("/")
 				? fullName.slice(
-						0,
-						-1
-					)
+					0,
+					-1
+				)
 				: fullName;
 
 		const segments =
@@ -929,7 +1034,7 @@ function parseTar(tar) {
 			Math.ceil(
 				size / 512
 			) *
-				512;
+			512;
 
 		if (
 			!Number.isSafeInteger(
@@ -937,7 +1042,8 @@ function parseTar(tar) {
 			) ||
 			dataEnd >
 				tar.length ||
-			next > tar.length
+			next >
+				tar.length
 		) {
 			throw new Error(
 				`Truncated tar entry: ${fullName}`
@@ -988,6 +1094,10 @@ function extractTar(
 	const entries =
 		parseTar(tar);
 
+	debugLog(
+		`Extracting ${entries.length} tar entries...`
+	);
+
 	let count = 0;
 
 	for (
@@ -1023,6 +1133,10 @@ function extractTar(
 		}
 	}
 
+	debugLog(
+		`Extracted ${count} files.`
+	);
+
 	return count;
 }
 
@@ -1031,12 +1145,28 @@ function extractTar(
 // ============================================================
 
 setTitle(
-	"Starting game..."
+	"Starting game runtime..."
+);
+
+debugLog(
+	"Calling runtime.runMain()..."
 );
 
 await runtime.runMain();
 
+debugLog(
+	"runtime.runMain() completed."
+);
+
+debugLog(
+	"Calling WasmBootstrap.PreInit()..."
+);
+
 await exports.WasmBootstrap.PreInit();
+
+debugLog(
+	"PreInit completed."
+);
 
 // ============================================================
 // Restore saves
@@ -1052,6 +1182,10 @@ try {
 			"Saves.tar"
 		);
 
+	debugLog(
+		"Saves.tar found. Restoring..."
+	);
+
 	exports.WasmBootstrap.CreateContentDirectory(
 		"/libsdl/saves/Saves"
 	);
@@ -1060,13 +1194,24 @@ try {
 		savesTar,
 		"/libsdl/saves/Saves/"
 	);
+
+	debugLog(
+		"Save data restored."
+	);
 } catch (error) {
 	if (
-		error?.name !==
+		error?.name ===
 		"NotFoundError"
 	) {
+		debugLog(
+			"No previous save archive found."
+		);
+	} else {
+		debugLog(
+			"Save archive could not be restored; continuing."
+		);
+
 		console.error(
-			"Couldn't restore Saves.tar; archive was ignored:",
 			error
 		);
 	}
@@ -1082,33 +1227,50 @@ try {
 			"DevicePreferences.tar"
 		);
 
+	debugLog(
+		"DevicePreferences.tar found. Restoring..."
+	);
+
 	extractTar(
 		preferencesTar,
 		"/libsdl/saves/"
 	);
+
+	debugLog(
+		"Preferences restored."
+	);
 } catch (error) {
 	if (
-		error?.name !==
+		error?.name ===
 		"NotFoundError"
 	) {
+		debugLog(
+			"No previous preferences found."
+		);
+	} else {
+		debugLog(
+			"Preferences could not be restored; continuing."
+		);
+
 		console.error(
-			"Couldn't restore DevicePreferences.tar; archive was ignored:",
 			error
 		);
 	}
 }
 
 // ============================================================
-// Extract game files
+// Extract game content
 // ============================================================
 
 setTitle(
 	"Loading game files..."
 );
 
-setContentProgress(
-	1,
-	"Extracting game files..."
+contentLabel.textContent =
+	"Extracting game content...";
+
+debugLog(
+	"Extracting game content into WasmFS..."
 );
 
 extractTar(
@@ -1116,19 +1278,29 @@ extractTar(
 	"/libsdl/"
 );
 
+debugLog(
+	"Game content extracted."
+);
+
 if (audioTar) {
 	setTitle(
 		"Loading music..."
 	);
 
-	setContentProgress(
-		1,
-		"Extracting music..."
+	contentLabel.textContent =
+		"Extracting music...";
+
+	debugLog(
+		"Extracting music into WasmFS..."
 	);
 
 	extractTar(
 		audioTar,
 		"/libsdl/"
+	);
+
+	debugLog(
+		"Music extracted."
 	);
 }
 
@@ -1138,6 +1310,10 @@ if (audioTar) {
 
 setTitle(
 	"Starting Stardew Valley..."
+);
+
+debugLog(
+	"Initializing game..."
 );
 
 loading.classList.add(
@@ -1151,18 +1327,26 @@ const dpr =
 const w =
 	Math.round(
 		canvas.clientWidth *
-			dpr
+		dpr
 	) || 1280;
 
 const h =
 	Math.round(
 		canvas.clientHeight *
-			dpr
+		dpr
 	) || 720;
+
+debugLog(
+	`Canvas size: ${w}x${h}`
+);
 
 await exports.WasmBootstrap.Init(
 	w,
 	h
+);
+
+debugLog(
+	"Game initialization completed."
 );
 
 // ============================================================
@@ -1178,13 +1362,13 @@ new ResizeObserver(
 		const nw =
 			Math.round(
 				canvas.clientWidth *
-					dpr
+				dpr
 			);
 
 		const nh =
 			Math.round(
 				canvas.clientHeight *
-					dpr
+				dpr
 			);
 
 		if (
@@ -1222,7 +1406,9 @@ document.addEventListener(
 				"ArrowLeft",
 				"ArrowRight",
 				"Tab"
-			].includes(e.code)
+			].includes(
+				e.code
+			)
 		) {
 			e.preventDefault();
 		}
@@ -1233,6 +1419,10 @@ document.addEventListener(
 // Main loop
 // ============================================================
 
+debugLog(
+	"Starting Stardew main loop..."
+);
+
 try {
 	await exports.WasmBootstrap.MainLoop();
 } catch (error) {
@@ -1242,4 +1432,8 @@ try {
 	) {
 		throw error;
 	}
+
+	debugLog(
+		"MainLoop exited with normal 'unwind' sentinel."
+	);
 }
