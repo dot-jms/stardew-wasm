@@ -4,29 +4,44 @@ const musicChoice = document.getElementById("music-choice");
 
 // --- OPFS helpers ---
 const opfs = await navigator.storage.getDirectory();
+
 // Ask the browser not to evict the cached content or save archive under storage
 // pressure. Browsers may decline, so this is deliberately best-effort.
 void navigator.storage.persist?.().catch(() => false);
 
 async function opfsHas(name) {
-	try { await opfs.getFileHandle(name); return true; } catch { return false; }
+	try {
+		await opfs.getFileHandle(name);
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 async function opfsRead(name) {
 	return new Uint8Array(
-		await (await (await opfs.getFileHandle(name)).getFile()).arrayBuffer()
+		await (
+			await (
+				await opfs.getFileHandle(name)
+			).getFile()
+		).arrayBuffer()
 	);
 }
 
 async function fetchChunkCount(url) {
 	const response = await fetch(url);
+
 	if (!response.ok)
-		throw new Error(`Failed to fetch ${url}: HTTP ${response.status}`);
+		throw new Error(
+			`Failed to fetch ${url}: HTTP ${response.status}`
+		);
 
 	const text = (await response.text()).trim();
 
 	if (!/^\d+$/.test(text) || Number(text) < 1)
-		throw new Error(`Invalid chunk count in ${url}: ${JSON.stringify(text)}`);
+		throw new Error(
+			`Invalid chunk count in ${url}: ${JSON.stringify(text)}`
+		);
 
 	return Number(text);
 }
@@ -39,13 +54,19 @@ async function readTarChunks(base, label, writeChunk) {
 	let total = 0;
 
 	for (let i = 0; i < count; i++) {
-		const res = await fetch(`${base}${String(i).padStart(2, "0")}`);
+		const res = await fetch(
+			`${base}${String(i).padStart(2, "0")}`
+		);
 
 		if (!res.ok)
-			throw new Error(`Failed to fetch ${res.url}: HTTP ${res.status}`);
+			throw new Error(
+				`Failed to fetch ${res.url}: HTTP ${res.status}`
+			);
 
 		if (!res.body)
-			throw new Error(`Streaming response body unavailable for ${res.url}`);
+			throw new Error(
+				`Streaming response body unavailable for ${res.url}`
+			);
 
 		const reader = res.body.getReader();
 
@@ -55,6 +76,7 @@ async function readTarChunks(base, label, writeChunk) {
 			if (done) break;
 
 			await writeChunk(value);
+
 			total += value.length;
 
 			loading.textContent =
@@ -65,39 +87,52 @@ async function readTarChunks(base, label, writeChunk) {
 	return total;
 }
 
+// Download directly into one buffer instead of keeping every chunk in
+// an array and then allocating another full-size buffer.
 async function downloadTarToMemory(base, label) {
-	const chunks = [];
+	const initialSize = 70 * 1024 * 1024;
 
-	const total = await readTarChunks(
+	let tar = new Uint8Array(initialSize);
+	let offset = 0;
+
+	await readTarChunks(
 		base,
 		label,
 		(chunk) => {
-			chunks.push(chunk);
+			// Grow the buffer only if needed.
+			if (offset + chunk.length > tar.length) {
+				let newSize = tar.length;
+
+				while (newSize < offset + chunk.length) {
+					newSize *= 2;
+				}
+
+				const next = new Uint8Array(newSize);
+				next.set(tar, 0);
+
+				tar = next;
+			}
+
+			tar.set(chunk, offset);
+			offset += chunk.length;
+
+			loading.textContent =
+				`Downloading ${label}... ${(offset / 1048576) | 0} MB`;
 		}
 	);
 
-	loading.textContent = `Preparing ${label}...`;
+	loading.textContent = `Loaded ${label}.`;
 
-	const tar = new Uint8Array(total);
-
-	let off = 0;
-
-	for (const c of chunks) {
-		tar.set(c, off);
-		off += c.length;
-	}
-
-	return tar;
+	// This creates a view without copying the archive again.
+	return tar.subarray(0, offset);
 }
 
 // Initial game content is kept in memory instead of being written to OPFS.
-// This avoids getting stuck during the caching step on some browsers.
 async function downloadAndCacheTar(base, label, key) {
 	return await downloadTarToMemory(base, label);
 }
 
-// Also bypass the existing OPFS cache for the initial test.
-// This guarantees the game is downloaded and loaded fresh.
+// Also bypass the existing OPFS cache for the initial game-content test.
 async function getTar(base, label, key) {
 	return await downloadTarToMemory(base, label);
 }
@@ -105,39 +140,54 @@ async function getTar(base, label, key) {
 // --- Music choice (skip if audio already cached) ---
 const audioCached = await opfsHas("ContentAudio.tar");
 
-const wantMusic = audioCached || await new Promise((resolve) => {
-	musicChoice.style.display = "";
+const wantMusic =
+	audioCached ||
+	(await new Promise((resolve) => {
+		musicChoice.style.display = "";
 
-	document.getElementById("btn-no-music").onclick = () => {
-		musicChoice.style.display = "none";
-		resolve(false);
-	};
+		document.getElementById("btn-no-music").onclick = () => {
+			musicChoice.style.display = "none";
+			resolve(false);
+		};
 
-	document.getElementById("btn-with-music").onclick = () => {
-		musicChoice.style.display = "none";
-		resolve(true);
-	};
-});
+		document.getElementById("btn-with-music").onclick = () => {
+			musicChoice.style.display = "none";
+			resolve(true);
+		};
+	}));
 
 musicChoice.style.display = "none";
 
-// --- Parallel: download tars + boot runtime ---
-const contentP = getTar(
+// --- Download game content FIRST ---
+// This prevents the large content archive and the WASM runtime from
+// competing for memory at the same time.
+
+const contentTar = await getTar(
 	"Content.tar",
 	"game content",
 	"Content.tar"
 );
 
-const audioP = wantMusic
-	? getTar("ContentAudio.tar", "music", "ContentAudio.tar")
-	: Promise.resolve(null);
+const audioTar = wantMusic
+	? await getTar(
+			"ContentAudio.tar",
+			"music",
+			"ContentAudio.tar"
+		)
+	: null;
 
-const runtimeP = (async () => {
+loading.textContent = "Starting game runtime...";
+
+// --- Start .NET/WASM runtime ---
+const runtime = await (async () => {
 	const { dotnet } = await import("./_framework/dotnet.js");
 
 	return dotnet
 		.withModuleConfig({ canvas })
-		.withEnvironmentVariable("MONO_SLEEP_ABORT_LIMIT", "99999")
+		.withEnvironmentVariable(
+			"MONO_SLEEP_ABORT_LIMIT",
+			"99999"
+		)
 		.withRuntimeOptions([
 			`--jiterpreter-minimum-trace-hit-count=${500}`,
 			`--jiterpreter-trace-monitoring-period=${100}`,
@@ -147,21 +197,27 @@ const runtimeP = (async () => {
 		])
 		.withResourceLoader(
 			(type, _name, defaultUri, _integrity, behavior) => {
-				if (type === "dotnetwasm" && behavior === "dotnetwasm") {
+				if (
+					type === "dotnetwasm" &&
+					behavior === "dotnetwasm"
+				) {
 					return (async () => {
-						const count = await fetchChunkCount(
-							defaultUri + ".count"
-						);
+						const count =
+							await fetchChunkCount(
+								defaultUri + ".count"
+							);
 
 						let idx = 0;
 
 						const fetchNext = async () => {
-							if (idx >= count) return null;
+							if (idx >= count)
+								return null;
 
 							const uri =
 								defaultUri + idx;
 
-							const res = await fetch(uri);
+							const res =
+								await fetch(uri);
 
 							idx++;
 
@@ -178,7 +234,8 @@ const runtimeP = (async () => {
 							return res.body.getReader();
 						};
 
-						let current = await fetchNext();
+						let current =
+							await fetchNext();
 
 						if (!current)
 							throw new Error(
@@ -191,12 +248,19 @@ const runtimeP = (async () => {
 									const {
 										value,
 										done
-									} = await current.read();
+									} =
+										await current.read();
 
-									if (done || !value) {
-										current = await fetchNext();
+									if (
+										done ||
+										!value
+									) {
+										current =
+											await fetchNext();
 
-										if (current) {
+										if (
+											current
+										) {
 											await this.pull(
 												controller
 											);
@@ -204,7 +268,9 @@ const runtimeP = (async () => {
 											controller.close();
 										}
 									} else {
-										controller.enqueue(value);
+										controller.enqueue(
+											value
+										);
 									}
 								},
 							}),
@@ -222,32 +288,31 @@ const runtimeP = (async () => {
 		.create();
 })();
 
-const [contentTar, audioTar, runtime] = await Promise.all([
-	contentP,
-	audioP,
-	runtimeP
-]);
-
-loading.textContent = "Starting game runtime...";
-
-const exports = await runtime.getAssemblyExports(
-	runtime.getConfig().mainAssemblyName
-);
+const exports =
+	await runtime.getAssemblyExports(
+		runtime.getConfig().mainAssemblyName
+	);
 
 // --- Validate and extract tar into WasmFS ---
 
-// Validation is deliberately a separate first pass: a truncated/partial OPFS
-// archive must never write half a farm before the parser notices corruption.
 function parseTar(tar) {
 	if (!(tar instanceof Uint8Array))
-		throw new TypeError("Tar archive isn't a Uint8Array");
+		throw new TypeError(
+			"Tar archive isn't a Uint8Array"
+		);
 
 	const entries = [];
 	const paths = new Set();
 
-	const decoder = new TextDecoder("utf-8", { fatal: true });
+	const decoder = new TextDecoder("utf-8", {
+		fatal: true,
+	});
 
-	const readString = (buf, offset, length) => {
+	const readString = (
+		buf,
+		offset,
+		length
+	) => {
 		let end = offset;
 
 		while (
@@ -262,7 +327,12 @@ function parseTar(tar) {
 		);
 	};
 
-	const readOctal = (buf, offset, length, field) => {
+	const readOctal = (
+		buf,
+		offset,
+		length,
+		field
+	) => {
 		const value = readString(
 			buf,
 			offset,
@@ -274,9 +344,15 @@ function parseTar(tar) {
 				`Invalid tar ${field}: ${JSON.stringify(value)}`
 			);
 
-		const parsed = Number.parseInt(value, 8);
+		const parsed = Number.parseInt(
+			value,
+			8
+		);
 
-		if (!Number.isSafeInteger(parsed) || parsed < 0)
+		if (
+			!Number.isSafeInteger(parsed) ||
+			parsed < 0
+		)
 			throw new Error(
 				`Tar ${field} is out of range`
 			);
@@ -293,28 +369,41 @@ function parseTar(tar) {
 			pos + 512
 		);
 
-		if (header.every((value) => value === 0)) {
+		if (
+			header.every(
+				(value) => value === 0
+			)
+		) {
 			foundEnd = true;
 			break;
 		}
 
-		const storedChecksum = readOctal(
-			header,
-			148,
-			8,
-			"checksum"
-		);
+		const storedChecksum =
+			readOctal(
+				header,
+				148,
+				8,
+				"checksum"
+			);
 
 		let actualChecksum = 0;
 
-		for (let index = 0; index < 512; index++) {
+		for (
+			let index = 0;
+			index < 512;
+			index++
+		) {
 			actualChecksum +=
-				index >= 148 && index < 156
+				index >= 148 &&
+				index < 156
 					? 32
 					: header[index];
 		}
 
-		if (storedChecksum !== actualChecksum)
+		if (
+			storedChecksum !==
+			actualChecksum
+		)
 			throw new Error(
 				`Tar checksum mismatch at byte ${pos}`
 			);
@@ -325,11 +414,12 @@ function parseTar(tar) {
 			100
 		);
 
-		const headerPrefix = readString(
-			header,
-			345,
-			155
-		);
+		const headerPrefix =
+			readString(
+				header,
+				345,
+				155
+			);
 
 		const fullName = headerPrefix
 			? `${headerPrefix}/${name}`
@@ -351,26 +441,40 @@ function parseTar(tar) {
 		const isDirectory =
 			type === 53;
 
-		if (!isFile && !isDirectory)
+		if (
+			!isFile &&
+			!isDirectory
+		)
 			throw new Error(
 				`Unsupported tar entry type ${type} for ${fullName}`
 			);
 
-		if (isDirectory && size !== 0)
+		if (
+			isDirectory &&
+			size !== 0
+		)
 			throw new Error(
 				`Tar directory has data: ${fullName}`
 			);
 
-		if (isFile && fullName.endsWith("/"))
+		if (
+			isFile &&
+			fullName.endsWith("/")
+		)
 			throw new Error(
 				`Tar file has a directory path: ${fullName}`
 			);
 
-		const path = fullName.endsWith("/")
-			? fullName.slice(0, -1)
-			: fullName;
+		const path =
+			fullName.endsWith("/")
+				? fullName.slice(
+						0,
+						-1
+					)
+				: fullName;
 
-		const segments = path.split("/");
+		const segments =
+			path.split("/");
 
 		if (
 			!path ||
@@ -395,14 +499,21 @@ function parseTar(tar) {
 
 		paths.add(path);
 
-		const dataStart = pos + 512;
-		const dataEnd = dataStart + size;
+		const dataStart =
+			pos + 512;
+
+		const dataEnd =
+			dataStart + size;
+
 		const next =
 			dataStart +
-			Math.ceil(size / 512) * 512;
+			Math.ceil(size / 512) *
+				512;
 
 		if (
-			!Number.isSafeInteger(next) ||
+			!Number.isSafeInteger(
+				next
+			) ||
 			dataEnd > tar.length ||
 			next > tar.length
 		) {
@@ -415,7 +526,7 @@ function parseTar(tar) {
 			fullName: path,
 			isDirectory,
 			dataStart,
-			dataEnd
+			dataEnd,
 		});
 
 		pos = next;
@@ -440,7 +551,10 @@ function parseTar(tar) {
 	return entries;
 }
 
-function extractTar(tar, prefix) {
+function extractTar(
+	tar,
+	prefix
+) {
 	const entries = parseTar(tar);
 
 	let count = 0;
@@ -448,10 +562,15 @@ function extractTar(tar, prefix) {
 	for (const entry of entries) {
 		// Legacy full-save archives stored top-level device files under this sentinel.
 		const target =
-			entry.fullName.startsWith("__prefs__/")
+			entry.fullName.startsWith(
+				"__prefs__/"
+			)
 				? "/libsdl/saves/" +
-					entry.fullName.slice("__prefs__/".length)
-				: prefix + entry.fullName;
+					entry.fullName.slice(
+						"__prefs__/".length
+					)
+				: prefix +
+					entry.fullName;
 
 		if (entry.isDirectory) {
 			exports.WasmBootstrap.CreateContentDirectory(
@@ -473,15 +592,22 @@ function extractTar(tar, prefix) {
 	return count;
 }
 
+loading.textContent =
+	"Starting game...";
+
 await runtime.runMain();
 
-loading.textContent = "Restoring saved data...";
+loading.textContent =
+	"Restoring saved data...";
 
 await exports.WasmBootstrap.PreInit();
 
-// Restore saves from OPFS
+// --- Restore saves from OPFS ---
 try {
-	const savesTar = await opfsRead("Saves.tar");
+	const savesTar =
+		await opfsRead(
+			"Saves.tar"
+		);
 
 	exports.WasmBootstrap.CreateContentDirectory(
 		"/libsdl/saves/Saves"
@@ -492,11 +618,15 @@ try {
 		"/libsdl/saves/Saves/"
 	);
 } catch (error) {
-	if (error?.name !== "NotFoundError")
+	if (
+		error?.name !==
+		"NotFoundError"
+	) {
 		console.error(
 			"Couldn't restore Saves.tar; archive was ignored:",
 			error
 		);
+	}
 }
 
 // Preferences are also persisted separately from the much larger save archive.
@@ -504,21 +634,28 @@ try {
 // language, audio, or other device settings.
 try {
 	const preferencesTar =
-		await opfsRead("DevicePreferences.tar");
+		await opfsRead(
+			"DevicePreferences.tar"
+		);
 
 	extractTar(
 		preferencesTar,
 		"/libsdl/saves/"
 	);
 } catch (error) {
-	if (error?.name !== "NotFoundError")
+	if (
+		error?.name !==
+		"NotFoundError"
+	) {
 		console.error(
 			"Couldn't restore DevicePreferences.tar; archive was ignored:",
 			error
 		);
+	}
 }
 
-loading.textContent = "Loading game files...";
+loading.textContent =
+	"Loading game files...";
 
 extractTar(
 	contentTar,
@@ -526,24 +663,34 @@ extractTar(
 );
 
 if (audioTar) {
-	loading.textContent = "Loading music...";
+	loading.textContent =
+		"Loading music...";
+
 	extractTar(
 		audioTar,
 		"/libsdl/"
 	);
 }
 
-loading.classList.add("hidden");
+loading.classList.add(
+	"hidden"
+);
 
-const dpr = window.devicePixelRatio || 1;
+const dpr =
+	window.devicePixelRatio ||
+	1;
 
 const w =
-	Math.round(canvas.clientWidth * dpr) ||
-	1280;
+	Math.round(
+		canvas.clientWidth *
+			dpr
+	) || 1280;
 
 const h =
-	Math.round(canvas.clientHeight * dpr) ||
-	720;
+	Math.round(
+		canvas.clientHeight *
+			dpr
+	) || 720;
 
 await exports.WasmBootstrap.Init(
 	w,
@@ -552,19 +699,25 @@ await exports.WasmBootstrap.Init(
 
 new ResizeObserver(() => {
 	const dpr =
-		window.devicePixelRatio || 1;
+		window.devicePixelRatio ||
+		1;
 
 	const nw =
 		Math.round(
-			canvas.clientWidth * dpr
+			canvas.clientWidth *
+				dpr
 		);
 
 	const nh =
 		Math.round(
-			canvas.clientHeight * dpr
+			canvas.clientHeight *
+				dpr
 		);
 
-	if (nw > 0 && nh > 0) {
+	if (
+		nw > 0 &&
+		nh > 0
+	) {
 		try {
 			exports.WasmBootstrap.Resize(
 				nw,
@@ -578,20 +731,23 @@ try {
 	void navigator.keyboard?.lock().catch(() => {});
 } catch {}
 
-document.addEventListener("keydown", (e) => {
-	if (
-		[
-			"Space",
-			"ArrowUp",
-			"ArrowDown",
-			"ArrowLeft",
-			"ArrowRight",
-			"Tab"
-		].includes(e.code)
-	) {
-		e.preventDefault();
+document.addEventListener(
+	"keydown",
+	(e) => {
+		if (
+			[
+				"Space",
+				"ArrowUp",
+				"ArrowDown",
+				"ArrowLeft",
+				"ArrowRight",
+				"Tab",
+			].includes(e.code)
+		) {
+			e.preventDefault();
+		}
 	}
-});
+);
 
 try {
 	await exports.WasmBootstrap.MainLoop();
